@@ -1,641 +1,3 @@
-import streamlit as st
-import folium
-from streamlit_folium import st_folium
-import pandas as pd
-import numpy as np
-import time
-import json
-import urllib.request
-from datetime import datetime
-
-st.set_page_config(
-    page_title="Project DHRUVA — Sikkim NH-10 Command Center",
-    page_icon="🛰️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom Command-Center Styling
-st.markdown("""
-    <style>
-    .metric-container { background-color: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 12px; }
-    .alert-box { background-color: #450a0a; padding: 16px; border-radius: 8px; border: 1px solid #ef4444; color: #fecaca; }
-    .action-badge { background-color: #1e293b; border-left: 4px solid #38bdf8; padding: 10px 14px; border-radius: 4px; margin-bottom: 8px; }
-    .field-card { background-color: #1e293b; border: 1px solid #334155; padding: 12px; border-radius: 6px; margin-bottom: 8px; }
-    </style>
-""", unsafe_allow_html=True)
-
-st.title("🛰️ Project DHRUVA: Sikkim NH-10 Landslide Risk & Logistics Triage")
-st.caption("Operational Corridor: Sevoke – Kalijhora – 29th Mile – Melli – Rangpo – Singtam – Gangtok | High-Res Satellite Radar | SIH 2026")
-
-# -----------------------------------------------------------------------------
-# 1. GEOSPATIAL LANDSLIDE HAZARD ZONES (Mountain Slope Catchment Polygons)
-# -----------------------------------------------------------------------------
-LANDSLIDE_ZONES = [
-    {
-        "id": "ZONE-01",
-        "name": "Zone A: Kalijhora Fracture Basin",
-        "polygon": [
-            [26.902, 88.442],
-            [26.925, 88.440],
-            [26.928, 88.468],
-            [26.905, 88.472]
-        ],
-        "base_slope": 52.4,
-        "soil_factor": 0.78,
-        "debris_potential": "2,800 m³",
-        "geology": "Damaged Daling Phyllites & Colluvium"
-    },
-    {
-        "id": "ZONE-02",
-        "name": "Zone B: Setijhora Siphon Chute",
-        "polygon": [
-            [26.935, 88.435],
-            [26.958, 88.432],
-            [26.962, 88.455],
-            [26.938, 88.458]
-        ],
-        "base_slope": 48.0,
-        "soil_factor": 0.65,
-        "debris_potential": "1,900 m³",
-        "geology": "Fractured Quartzites & Weathered Gneiss"
-    },
-    {
-        "id": "ZONE-03",
-        "name": "Zone C: 29th Mile Chronic Rupture Envelope",
-        "polygon": [
-            [26.995, 88.420],
-            [27.028, 88.418],
-            [27.032, 88.445],
-            [26.998, 88.448]
-        ],
-        "base_slope": 63.5,
-        "soil_factor": 0.92,
-        "debris_potential": "5,400 m³ (Massive Block Breach)",
-        "geology": "High Shear-Stress Phyllitic Schist"
-    },
-    {
-        "id": "ZONE-04",
-        "name": "Zone D: Melli-Teesta Confluence Slump Zone",
-        "polygon": [
-            [27.072, 88.438],
-            [27.098, 88.435],
-            [27.102, 88.468],
-            [27.075, 88.470]
-        ],
-        "base_slope": 44.2,
-        "soil_factor": 0.72,
-        "debris_potential": "2,200 m³",
-        "geology": "Riverbank Toe Erosion & Loose Silt"
-    },
-    {
-        "id": "ZONE-05",
-        "name": "Zone E: Singtam KM-28 Deep-Seated Basin",
-        "polygon": [
-            [27.220, 88.482],
-            [27.252, 88.480],
-            [27.255, 88.515],
-            [27.222, 88.518]
-        ],
-        "base_slope": 57.8,
-        "soil_factor": 0.88,
-        "debris_potential": "4,100 m³ (Deep Rotational Slip)",
-        "geology": "Graphitic Schist & Water-Saturated Clay"
-    },
-    {
-        "id": "ZONE-06",
-        "name": "Zone F: Ranipool Valley Toe Escarpment",
-        "polygon": [
-            [27.280, 88.568],
-            [27.308, 88.565],
-            [27.310, 88.598],
-            [27.282, 88.600]
-        ],
-        "base_slope": 39.5,
-        "soil_factor": 0.58,
-        "debris_potential": "1,400 m³",
-        "geology": "Residual Mountain Colluvium"
-    }
-]
-
-NH10_SEGMENTS = [
-    {"name": "Sevoke to Kalijhora", "path": [[26.885, 88.471], [26.912, 88.459]], "zone_ref": "ZONE-01"},
-    {"name": "Kalijhora to Setijhora", "path": [[26.912, 88.459], [26.940, 88.448]], "zone_ref": "ZONE-02"},
-    {"name": "Setijhora to 29th Mile", "path": [[26.940, 88.448], [26.978, 88.438], [27.012, 88.434]], "zone_ref": "ZONE-03"},
-    {"name": "29th Mile to Melli", "path": [[27.012, 88.434], [27.054, 88.439], [27.086, 88.452]], "zone_ref": "ZONE-04"},
-    {"name": "Melli to Rangpo Checkpost", "path": [[27.086, 88.452], [27.125, 88.489], [27.176, 88.528]], "zone_ref": None},
-    {"name": "Rangpo to Singtam Basin", "path": [[27.176, 88.528], [27.208, 88.514], [27.238, 88.498]], "zone_ref": "ZONE-05"},
-    {"name": "Singtam to Ranipool & Gangtok", "path": [[27.238, 88.498], [27.262, 88.520], [27.295, 88.585], [27.328, 88.612]], "zone_ref": "ZONE-06"}
-]
-
-BYPASS_COORDINATES = [
-    [26.885, 88.471], [26.910, 88.550], [27.000, 88.620],
-    [27.086, 88.662], [27.118, 88.587], [27.168, 88.635],
-    [27.185, 88.643], [27.235, 88.595], [27.295, 88.585], [27.328, 88.612]
-]
-
-# -----------------------------------------------------------------------------
-# 2. SESSION STATE MANAGEMENT
-# -----------------------------------------------------------------------------
-if "registered_commuters" not in st.session_state:
-    st.session_state.registered_commuters = [
-        {"name": "Tashi Bhutia", "contact": "+91 98321-XXXXX", "vehicle": "SK-01-A-4421", "blood": "O+", "alerts": "Diabetic, Cardiac", "token": "[UIDAI-Virtual-Token-Masked]", "status": "In Transit"},
-        {"name": "Rajesh Kumar", "contact": "+91 94191-XXXXX", "vehicle": "WB-74-B-8910", "blood": "B+", "alerts": "None", "token": "[DL-Verified-6102]", "status": "In Transit"},
-        {"name": "Maj. S. K. Nair", "contact": "+91 98110-XXXXX", "vehicle": "ARMY-CONVOY-07", "blood": "A+", "alerts": "Asthma", "token": "[MIL-Service-882]", "status": "In Transit"}
-    ]
-
-if "field_incidents" not in st.session_state:
-    st.session_state.field_incidents = []
-
-if "weather_source" not in st.session_state:
-    st.session_state.weather_source = "Manual Simulation"
-
-if "current_rainfall" not in st.session_state:
-    st.session_state.current_rainfall = 90
-
-if "current_saturation" not in st.session_state:
-    st.session_state.current_saturation = 70
-
-# -----------------------------------------------------------------------------
-# 3. LIVE WEATHER API FETCH (Open-Meteo Real-Time Telemetry)
-# -----------------------------------------------------------------------------
-def fetch_live_weather():
-    try:
-        # Gangtok / Teesta Basin Coordinates: 27.33 N, 88.61 E
-        url = "https://api.open-meteo.com/v1/forecast?latitude=27.33&longitude=88.61&current=temperature_2m,relative_humidity_2m,precipitation,rain&daily=precipitation_sum&timezone=Asia%2FKolkata"
-        req = urllib.request.Request(url, headers={"User-Agent": "ProjectDHRUVA/1.0"})
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            data = json.loads(resp.read().decode())
-            daily_precip = data.get("daily", {}).get("precipitation_sum", [0.0])[0]
-            humidity = data.get("current", {}).get("relative_humidity_2m", 65)
-            # Map precipitation into 24-hr equivalent scaled for monsoon stress
-            st.session_state.current_rainfall = int(max(daily_precip * 5.0, 45.0))
-            st.session_state.current_saturation = int(min(max(humidity, 30), 95))
-            st.session_state.weather_source = f"Live Open-Meteo (Gangtok: {data['current']['temperature_2m']}°C, Hum: {humidity}%)"
-            return True
-    except Exception as e:
-        st.session_state.weather_source = "API Fallback (Simulated Teesta Feed)"
-        return False
-
-# -----------------------------------------------------------------------------
-# 4. SIDEBAR CONTROLS
-# -----------------------------------------------------------------------------
-st.sidebar.title("Teesta Basin Telemetry")
-st.sidebar.caption(f"Source: {st.session_state.weather_source}")
-
-if st.sidebar.button("📡 Fetch Real-Time Satellite/IMD Telemetry"):
-    with st.sidebar.status("Connecting to satellite telemetry...", expanded=False):
-        success = fetch_live_weather()
-        time.sleep(0.5)
-    if success:
-        st.sidebar.success("Live weather telemetry synced!")
-    else:
-        st.sidebar.info("Satellite telemetry simulated (offline mode).")
-
-simulated_rainfall = st.sidebar.slider(
-    "24h Antecedent Rainfall (mm)",
-    min_value=0, max_value=250, value=st.session_state.current_rainfall, step=5,
-    help="Precipitation trigger calibrated from IMD Doppler Radars."
-)
-st.session_state.current_rainfall = simulated_rainfall
-
-soil_sat = st.sidebar.slider(
-    "Soil Pore-Water Saturation (%)",
-    min_value=15, max_value=100, value=st.session_state.current_saturation, step=5,
-    help="Sub-surface hydrologic saturation in high-permeability phyllite strata."
-)
-st.session_state.current_saturation = soil_sat
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Crisis Scenario Override")
-force_collapse = st.sidebar.toggle("🚨 Trigger Active Debris Flow at 29th Mile", value=False)
-
-# -----------------------------------------------------------------------------
-# 5. DYNAMIC GEOTECHNICAL HAZARD INFERENCE ENGINE
-# -----------------------------------------------------------------------------
-evaluated_zones = []
-critical_zones_count = 0
-warning_zones_count = 0
-safe_zones_count = 0
-
-# Check active field incident targets
-incident_zone_ids = [inc["zone_id"] for inc in st.session_state.field_incidents]
-
-for zone in LANDSLIDE_ZONES:
-    slope_norm = zone["base_slope"] / 65.0
-    rain_norm = simulated_rainfall / 200.0
-    sat_norm = soil_sat / 100.0
-
-    score = (0.35 * slope_norm + 0.40 * rain_norm + 0.25 * sat_norm) * zone["soil_factor"]
-    
-    # Override for manual scenario or verified field incident
-    if (force_collapse and ("29th Mile" in zone["name"] or "Singtam" in zone["name"])) or (zone["id"] in incident_zone_ids):
-        score = 0.98
-
-    score = min(max(score, 0.05), 0.99)
-    fos = round(max(0.4, 2.1 - (score * 1.7)), 2)
-
-    if score >= 0.65 or fos < 1.0:
-        status = "CRITICAL RUPTURE ZONE"
-        fill_color = "#ff1744"
-        border_color = "#b71c1c"
-        fill_opacity = 0.55
-        critical_zones_count += 1
-    elif score >= 0.40:
-        status = "HEIGHTENED ADVISORY ZONE"
-        fill_color = "#ff9100"
-        border_color = "#e65100"
-        fill_opacity = 0.42
-        warning_zones_count += 1
-    else:
-        status = "STABLE GEOLOGY"
-        fill_color = "#00e676"
-        border_color = "#1b5e20"
-        fill_opacity = 0.30
-        safe_zones_count += 1
-
-    evaluated_zones.append({
-        **zone,
-        "score": score,
-        "fos": fos,
-        "status": status,
-        "fill_color": fill_color,
-        "border_color": border_color,
-        "fill_opacity": fill_opacity
-    })
-
-fleet_at_risk = critical_zones_count * 150
-hourly_loss_lakhs = round(critical_zones_count * 3.2, 2)
-
-# Global Metrics Header
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Precipitation (IMD/Radar)", f"{simulated_rainfall} mm", delta="Cloudburst Alert" if simulated_rainfall > 110 else "Monitoring")
-k2.metric("Critical Rupture Zones", f"{critical_zones_count} Zones", delta=f"+{critical_zones_count} Red Slopes" if critical_zones_count > 0 else "All Clear", delta_color="inverse")
-k3.metric("Fleet at Risk", f"{fleet_at_risk} Trucks")
-k4.metric("Est. Economic Loss", f"₹{hourly_loss_lakhs} L/hr", delta_color="inverse")
-
-st.markdown("---")
-
-# -----------------------------------------------------------------------------
-# 6. COMMAND CENTER TABS
-# -----------------------------------------------------------------------------
-tab_map, tab_field, tab_broadcast, tab_vault, tab_sitrep = st.tabs([
-    "🛰️ Satellite Hazard Radar",
-    "👷 Field Incident Reporter",
-    "📡 Offline Cell Broadcast",
-    "🛡️ Citizen Safety Vault",
-    "📄 Automated DDMA SITREP"
-])
-
-# ---------------------------------------------------------
-# TAB 1: SATELLITE HAZARD MAP WITH VISIBLE CATCHMENT ZONES
-# ---------------------------------------------------------
-with tab_map:
-    col_map, col_panel = st.columns([2.6, 1])
-
-    with col_map:
-        st.subheader("Geospatial Landslide Susceptibility (Catchment Polygons)")
-
-        m = folium.Map(
-            location=[27.12, 88.51],
-            zoom_start=11,
-            tiles="https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-            attr="Google Satellite Hybrid"
-        )
-
-        zone_status_lookup = {}
-        for z in evaluated_zones:
-            zone_status_lookup[z["id"]] = z
-
-            folium.Polygon(
-                locations=z["polygon"],
-                color=z["border_color"],
-                weight=2,
-                fill=True,
-                fill_color=z["fill_color"],
-                fill_opacity=z["fill_opacity"],
-                tooltip=(
-                    f"<b>{z['name']}</b><br>"
-                    f"Status: <b>{z['status']}</b><br>"
-                    f"Failure Probability: <b>{z['score']*100:.1f}%</b><br>"
-                    f"Factor of Safety (FoS): <b>{z['fos']}</b><br>"
-                    f"Slope: {z['base_slope']}° | Debris Potential: {z['debris_potential']}<br>"
-                    f"Geology: {z['geology']}"
-                )
-            ).add_to(m)
-
-            center_lat = np.mean([pt[0] for pt in z["polygon"]])
-            center_lon = np.mean([pt[1] for pt in z["polygon"]])
-
-            folium.CircleMarker(
-                location=[center_lat, center_lon],
-                radius=6,
-                color="#ffffff",
-                weight=1,
-                fill=True,
-                fill_color=z["fill_color"],
-                fill_opacity=0.9,
-                tooltip=f"<b>{z['id']} Apex</b>: {z['status']}"
-            ).add_to(m)
-
-        for seg in NH10_SEGMENTS:
-            ref = seg["zone_ref"]
-            if ref and ref in zone_status_lookup:
-                parent_zone = zone_status_lookup[ref]
-                seg_color = parent_zone["fill_color"]
-                seg_weight = 7 if parent_zone["status"] == "CRITICAL RUPTURE ZONE" else 5
-            else:
-                seg_color = "#00e5ff"
-                seg_weight = 5
-
-            folium.PolyLine(
-                seg["path"],
-                color=seg_color,
-                weight=seg_weight,
-                opacity=0.95,
-                tooltip=f"NH-10 Segment: {seg['name']}"
-            ).add_to(m)
-
-        folium.PolyLine(
-            BYPASS_COORDINATES,
-            color="#00e676",
-            weight=4,
-            opacity=0.85,
-            dash_array="8, 8",
-            tooltip="Active Emergency Bypass: NH-717A (Lava – Algarah – Pakyong)"
-        ).add_to(m)
-
-        # Plot Ground Truth Field Incidents
-        for inc in st.session_state.field_incidents:
-            folium.Marker(
-                location=inc["coord"],
-                popup=f"<b>FIELD INCIDENT</b><br>Reporter: {inc['source']}<br>Anomaly: {inc['anomaly']}",
-                icon=folium.Icon(color="red", icon="exclamation-triangle", prefix="fa")
-            ).add_to(m)
-
-        if force_collapse or critical_zones_count > 0:
-            folium.Marker(
-                location=[27.012, 88.434],
-                popup="<b>EMERGENCY BREACH: 29th Mile</b><br>Debris Volume: ~5,400 m³<br>Highway blocked.",
-                icon=folium.Icon(color="red", icon="warning", prefix="fa")
-            ).add_to(m)
-
-        st_folium(m, width="100%", height=560)
-
-    with col_panel:
-        st.subheader("SSDMA Operational Triage")
-        st.markdown(
-            """
-            <div class="action-badge">
-            <strong>Active Arterial Corridor:</strong><br>
-            NH-10 (Sevoke – Gangtok)
-            </div>
-            <div class="action-badge" style="border-left-color: #00e676;">
-            <strong>Emergency Freight Bypass:</strong><br>
-            NH-717A (Dashed Green Polyline)
-            </div>
-            """, unsafe_allow_html=True
-        )
-
-        st.markdown("#### Geological Catchment Status")
-        for z in evaluated_zones:
-            icon = "🔴" if z["status"] == "CRITICAL RUPTURE ZONE" else ("🟠" if z["status"] == "HEIGHTENED ADVISORY ZONE" else "🟢")
-            st.write(f"{icon} **{z['name']}**<br><span style='font-size:12px;color:#94a3b8;'>FoS: {z['fos']} | Vol: {z['debris_potential']}</span>", unsafe_allow_html=True)
-
-        if critical_zones_count > 0 or force_collapse:
-            st.error("⚠️ HIGHWAY SEVERANCE CONFIRMED. Reroute heavy freight via NH-717A at Sevoke.")
-
-# ---------------------------------------------------------
-# TAB 2: FIELD INCIDENT REPORTER (HUMAN-IN-THE-LOOP)
-# ---------------------------------------------------------
-with tab_field:
-    st.subheader("👷 Ground-Truth Anomaly Reporting (Human-in-the-Loop Sensor Fusion)")
-    st.markdown(
-        "Satellite passes experience orbital latency and cloud occlusion during monsoons. This module enables "
-        "**BRO Project Swastik patrol units, Sikkim Police, and local taxi syndicates** to log early ground deformations "
-        "that instantly force the ML model to recalibrate."
-    )
-
-    f_col1, f_col2 = st.columns([1, 1.2])
-
-    with f_col1:
-        st.markdown("#### Log Field Observation")
-        with st.form("field_report_form"):
-            selected_zone_name = st.selectbox("Target Sector / Landmark", [z["name"] for z in LANDSLIDE_ZONES])
-            anomaly_type = st.selectbox("Physical Anomaly Observed", [
-                "Tension Cracks on Asphalt (>2.5 cm)",
-                "Continuous Shooting Stones / Rock Fall",
-                "Mud Slurry Seepage from Retaining Wall Toe",
-                "Road Shoulder Subsidence / Dip",
-                "Riverbank Toe Erosion & Undercutting"
-            ])
-            reporter = st.selectbox("Observer Agency", [
-                "BRO Project Swastik (Patrol Unit-2)",
-                "Sikkim Highway Police (Rangpo Outpost)",
-                "All Sikkim Commercial Drivers Association",
-                "Forest Dept Mobile Ranger"
-            ])
-            urgency = st.radio("Urgency Level", ["Immediate Failure Risk (High)", "Developing Instability (Medium)"], horizontal=True)
-            
-            sub = st.form_submit_button("🚨 Submit Verified Field Anomaly")
-            if sub:
-                target_z = next(z for z in LANDSLIDE_ZONES if z["name"] == selected_zone_name)
-                center_coord = [np.mean([p[0] for p in target_z["polygon"]]), np.mean([p[1] for p in target_z["polygon"]])]
-                
-                st.session_state.field_incidents.append({
-                    "zone_id": target_z["id"],
-                    "zone_name": target_z["name"],
-                    "anomaly": anomaly_type,
-                    "source": reporter,
-                    "coord": center_coord,
-                    "timestamp": datetime.now().strftime("%H:%M:%S")
-                })
-                st.success(f"Incident logged for {target_z['id']}. Geotechnical vulnerability forced to Critical (98%).")
-                st.rerun()
-
-    with f_col2:
-        st.markdown("#### Active Verified Ground Reports")
-        if not st.session_state.field_incidents:
-            st.info("No active ground incidents reported. Nominal patrol surveillance active.")
-        else:
-            for inc in st.session_state.field_incidents:
-                st.markdown(f"""
-                <div class="field-card">
-                    <strong>⚠️ {inc['zone_name']}</strong> — <em>Logged at {inc['timestamp']} IST</em><br>
-                    <strong>Anomaly:</strong> {inc['anomaly']}<br>
-                    <strong>Reported By:</strong> {inc['source']}<br>
-                    <span style="color:#ef4444;"><strong>Status:</strong> Immediate Catchment Rupture Alert Triggered</span>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            if st.button("🧹 Clear Ground Incidents (Post-Clearance)"):
-                st.session_state.field_incidents = []
-                st.rerun()
-
-# ---------------------------------------------------------
-# TAB 3: OFFLINE EMERGENCY CELL BROADCAST
-# ---------------------------------------------------------
-with tab_broadcast:
-    st.subheader("Direct-to-Device Offline Crisis Broadcasting (NDMA CAP Protocol)")
-    st.markdown(
-        "During severe monsoon landslides, fiber optic cables in the Teesta gorge and mobile data towers are washed out. "
-        "Project DHRUVA triggers **Cell Broadcast Service (CBS / 3GPP TS 23.041)**, "
-        "pushing audible siren tones and evacuation alerts to every phone within radio range **with zero cellular data consumption**."
-    )
-
-    cb_col1, cb_col2 = st.columns([1.5, 1])
-
-    with cb_col1:
-        st.markdown("### Simulated Emergency Radio Payload")
-        st.markdown(f"""
-        <div class="alert-box">
-            <h3>🚨 NATIONAL DISASTER MANAGEMENT AUTHORITY (NDMA) BROADCAST</h3>
-            <p><strong>CHANNEL:</strong> EMERGENCY CELL BROADCAST (CH-4370 / SIREN PRIORITY-1)</p>
-            <p><strong>GEOGRAPHIC RADIUS:</strong> Sevoke, Kalijhora, 29th Mile, Melli & Rangpo BTS Towers</p>
-            <p><strong>DATA USAGE:</strong> 0 KB (Direct Signaling Control Channel — Works Offline)</p>
-            <hr style="border-color:#b91c1c;">
-            <p><strong>[CRITICAL LIFE-SAFETY ALERT]:</strong> Massive slope failure verified in <strong>Zone C (29th Mile) & Zone E (Singtam Basin)</strong> along <strong>NH-10</strong>. Road completely impassable. DO NOT ADVANCE. Pull vehicles into designated safe shelters or immediately divert via <strong>NH-717A (Lava-Algarah bypass)</strong>. NDRF 2nd Battalion and BRO Project Swastik deployed.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        if st.button("📡 Execute Cell-Tower & All India Radio (FM 101.4 MHz) Alert Broadcast"):
-            with st.spinner("Pinging 14 surviving base transceiver stations along the Teesta gorge..."):
-                time.sleep(1.2)
-                st.success("Emergency broadcast dispatched to 14 base stations. Cellular siren override triggered.")
-                st.toast("Emergency siren tone pushed to all handsets in radio perimeter!", icon="📢")
-
-    with cb_col2:
-        st.markdown("### Redundant Alert Channels")
-        st.markdown("""
-        1. **Cell Broadcast Service (CBS):**
-           - Functions when internet packages, SMS packs, and voice lines are dead.
-           - Bypasses network congestion to blast sound on all handsets.
-        2. **All India Radio (AIR Gangtok FM 101.4):**
-           - Automated synthesized audio advisory broadcasted to vehicle radios.
-        3. **Vehicle-to-Vehicle BLE Mesh:**
-           - Relays encrypted SOS hops between stranded commuter vehicles if towers lose power.
-        """)
-
-# ---------------------------------------------------------
-# TAB 4: CITIZEN SAFETY VAULT & RESCUE MANIFEST
-# ---------------------------------------------------------
-with tab_vault:
-    st.subheader("End-to-End Encrypted Citizen Transit Registry & First-Responder Manifest")
-    st.markdown(
-        "Commuters check in at Rangpo Checkpost. Identity tokens and medical profiles are securely tokenized "
-        "under the **Digital Personal Data Protection (DPDP) Act 2023**. If a slope collapse occurs, first responders receive "
-        "an instant triage manifest of civilians stranded in that exact geographic slice."
-    )
-
-    reg_col, manifest_col = st.columns([1, 1.3])
-
-    with reg_col:
-        st.markdown("#### Rangpo Checkpost: Corridor Transit Check-In")
-        with st.form("transit_form"):
-            c_name = st.text_input("Commuter Full Name", value="Arjun Sen")
-            c_phone = st.text_input("Mobile Number", value="+91 98450-XXXXX")
-            c_veh = st.text_input("Vehicle Registration No.", value="SK-02-C-1980")
-            c_blood = st.selectbox("Blood Group", ["O+", "A+", "B+", "AB+", "O-", "A-", "B-", "AB-"])
-            c_med = st.multiselect("Medical Flags", ["Asthma", "Diabetic", "Cardiac Condition", "Elderly Passenger", "Infant Onboard"], default=["Elderly Passenger"])
-            id_placeholder = st.text_input("Government Identity Token (Masked)", value="[UIDAI-Virtual-Token-Masked]")
-            
-            submitted = st.form_submit_button("🛡️ Encrypt & Register Corridor Transit")
-            if submitted:
-                st.session_state.registered_commuters.append({
-                    "name": c_name,
-                    "contact": c_phone,
-                    "vehicle": c_veh,
-                    "blood": c_blood,
-                    "alerts": ", ".join(c_med) if c_med else "None",
-                    "token": id_placeholder,
-                    "status": "Transit Active"
-                })
-                st.success(f"Registered {c_name} to NH-10 Protected Safety Ledger.")
-
-    with manifest_col:
-        st.markdown("#### First-Responder Triage Manifest (SSDMA & NDRF Command Desk)")
-        if force_collapse or critical_zones_count > 0:
-            st.error("⚠️ HAZARD DETECTED: Commuters Flagged in Immediate Proximity of Hazard Zones")
-        else:
-            st.success("Corridor Status: Nominal Transit Flow")
-
-        manifest_df = pd.DataFrame(st.session_state.registered_commuters)
-        st.dataframe(manifest_df[['name', 'vehicle', 'blood', 'alerts', 'token', 'status']], use_container_width=True)
-
-        if st.button("🚨 Generate Automated Incident SOS Ticket for NDRF 2nd Battalion"):
-            st.toast("Urgent SOS Dispatch Ticket generated with GPS coordinates & medical priorities.", icon="🚑")
-            st.code("""
-[AUTOMATED SSDMA/NDRF EMERGENCY DISPATCH MANIFEST]
-INCIDENT LOCATION: NH-10 KM-28 (29th Mile Gorge, Teesta Basin)
-SEVERITY: Category-4 Mass Slope Failure
-CIVILIANS IN HAZARD RADIUS: 3 Registered Vehicles Identified
-MEDICAL PRIORITIES:
-- Arjun Sen (Vehicle: SK-02-C-1980) | Flag: Elderly Passenger | Blood: O+
-- Tashi Bhutia (Vehicle: SK-01-A-4421) | Flag: Diabetic, Cardiac | Blood: O+
-DISPATCH ACTION: Deploy SDRF Medical Unit + BRO Project Swastik Excavator to coordinates [27.012, 88.434].
-            """, language="yaml")
-
-# ---------------------------------------------------------
-# TAB 5: AUTOMATED DDMA SITUATION REPORT (SITREP)
-# ---------------------------------------------------------
-with tab_sitrep:
-    st.subheader("📄 Automated DDMA Incident Situation Report (SITREP Generator)")
-    st.markdown(
-        "Generates formal administrative situational reports conforming to the **National Disaster Management Authority (NDMA) Incident Response System (IRS)** standards."
-    )
-
-    current_time_str = datetime.now().strftime("%d-%b-%Y %H:%M:%S IST")
-    red_zone_names = [z["name"] for z in evaluated_zones if z["status"] == "CRITICAL RUPTURE ZONE"]
-    
-    sitrep_text = f"""================================================================================
-SIKKIM STATE DISASTER MANAGEMENT AUTHORITY (SSDMA)
-CENTRAL EMERGENCY OPERATIONS CENTRE (SEOC), TASHILING, GANGTOK
-INCIDENT SITUATION REPORT (SITREP) — CORRIDOR NH-10 (TEESTA GORGE LIFELINE)
-================================================================================
-REPORT ID: SSDMA-NH10-SITREP-2026-0917
-DATETIME OF ISSUE: {current_time_str}
-OPERATIONAL STATUS: {"RED ALERT - CORRIDOR SEVERED" if critical_zones_count > 0 else "GREEN STATUS - NOMINAL"}
-
-1. METEOROLOGICAL & HYDROLOGICAL CONDITIONS:
-   - Primary Source: {st.session_state.weather_source}
-   - 24-Hour Antecedent Precipitation: {simulated_rainfall} mm
-   - Sub-surface Soil Pore Saturation: {soil_sat} %
-   - Hydrological Stress Index: {"EXTREME (Cloudburst Level)" if simulated_rainfall > 110 else "MODERATE TO SEVERE"}
-
-2. GEOTECHNICAL CORRIDOR VULNERABILITY:
-   - Total Monitored Catchment Basins: {len(LANDSLIDE_ZONES)}
-   - Active Critical Rupture Zones: {critical_zones_count}
-   - Active Heightened Advisory Zones: {warning_zones_count}
-   - Confirmed Critical Rupture Sites:
-     {chr(10).join([f"     * {name}" for name in red_zone_names]) if red_zone_names else "     * None. All slopes in stable equilibrium."}
-
-3. SOCIO-ECONOMIC & SUPPLY CHAIN IMPACT ESTIMATE:
-   - Commercial / Military Freight Fleet at Risk: {fleet_at_risk} Trucks
-   - Estimated Hourly Economic Loss: INR {hourly_loss_lakhs} Lakhs / hour
-   - Strategic Supply Continuity: {"COMPROMISED — Immediate bypass activation required." if critical_zones_count > 0 else "NORMAL — Unrestricted traffic."}
-
-4. GROUND-TRUTH FIELD OBSERVATIONS:
-   - Total Active Verified Field Incidents: {len(st.session_state.field_incidents)}
-   {chr(10).join([f"   * [{inc['source']}] {inc['zone_name']}: {inc['anomaly']}" for inc in st.session_state.field_incidents]) if st.session_state.field_incidents else "   * Routine BRO patrol reports clear roadway."}
-
-5. IMMEDIATE ADMINISTRATIVE DIRECTIVES & DISPATCH:
-   - Traffic Action: {"Mandatory diversion of Siliguri-bound freight via NH-717A (Lava-Algarah-Pakyong)." if critical_zones_count > 0 else "Allow unrestricted freight transit with speed limit 30 km/h."}
-   - Engineering Action: {"Pre-position BRO Project Swastik heavy wheel loaders at Rangpo & Melli." if critical_zones_count > 0 else "Standard patrol units on 60-minute standby."}
-   - Civilian Warning: {"Dispatched NDMA Cell Broadcast alert payload to all base stations along Teesta basin." if critical_zones_count > 0 else "Green condition; no siren broadcast required."}
-================================================================================
-AUTHORIZED BY: Emergency Operations Commissioner, SSDMA / District Collector, East Sikkim
-DOCUMENT PREPARED BY: Project DHRUVA Automated Early Warning Engine (SIH26001)
-================================================================================
-"""
-
-    st.text_area("Live SITREP Document Preview", sitrep_text, height=360)
-    
-    st.download_button(
-        label="📥 Download Official SITREP Brief (.txt)",
-        data=sitrep_text,
-        file_name=f"SSDMA_NH10_SITREP_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-        mime="text/plain"
-    )
 import io
 import math
 import struct
@@ -833,7 +195,7 @@ ALERT_TRANSLATIONS = {
     },
 }
 
-# Session State for Human-in-the-Loop Patrol Reports
+# Session State for Patrol Reports
 if "patrol_reports" not in st.session_state:
     st.session_state.patrol_reports = [
         {
@@ -917,7 +279,6 @@ with st.sidebar:
 
 
 # ==================== 4. DYNAMIC RISK HEURISTICS & KPI METRICS ====================
-# Zone definitions along the Teesta River gorge
 ZONES = {
     "Zone A (Sevoke Entry)": {
         "lat": 26.885,
@@ -962,7 +323,6 @@ amber_zones = 0
 zone_results = {}
 
 for z_name, z_data in ZONES.items():
-    # Factor of Safety heuristic model: FoS = (Resisting Shear) / (Driving Stress)
     driving_stress = (
         (rainfall_input * 0.009 * z_data["base_sens"])
         + (soil_sat_input * 0.006)
@@ -990,13 +350,12 @@ for z_name, z_data in ZONES.items():
         "lon": z_data["lon"],
     }
 
-# Economic & freight calculation
 trucks_at_risk = (
     1240 if red_zones >= 2 else (620 if red_zones == 1 else (150 if amber_zones > 0 else 0))
 )
 economic_drain = (
     round(trucks_at_risk * 0.0035, 2) if red_zones > 0 else 0.0
-)  # ₹ Lakhs per hour
+)  # In ₹ Lakhs/hour
 
 
 # ==================== 5. TOP COMMAND HEADER & KPI DASHBOARD ====================
@@ -1020,7 +379,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 4-Card KPI Metric Deck
 st.markdown(
     f"""
 <div class="kpi-container">
@@ -1066,7 +424,6 @@ with tab1:
     col_map, col_details = st.columns([2.3, 1.0])
 
     with col_map:
-        # Build Folium Map
         m = folium.Map(
             location=[27.08, 88.50],
             zoom_start=11,
@@ -1075,15 +432,14 @@ with tab1:
             control_scale=True,
         )
 
-        # Draw Primary Arterial Route (NH-10)
         nh10_coords = [
-            [26.885, 88.471],  # Sevoke
-            [26.928, 88.455],  # Kalijhora
-            [27.012, 88.434],  # 29th Mile
-            [27.086, 88.458],  # Melli
-            [27.176, 88.528],  # Rangpo
-            [27.234, 88.498],  # Singtam
-            [27.331, 88.613],  # Gangtok
+            [26.885, 88.471],
+            [26.928, 88.455],
+            [27.012, 88.434],
+            [27.086, 88.458],
+            [27.176, 88.528],
+            [27.234, 88.498],
+            [27.331, 88.613],
         ]
         folium.PolyLine(
             nh10_coords,
@@ -1093,13 +449,12 @@ with tab1:
             tooltip="NH-10 Primary Arterial Corridor",
         ).add_to(m)
 
-        # Draw Emergency Bypass Route (NH-717A)
         nh717a_coords = [
-            [26.885, 88.471],  # Sevoke
-            [27.086, 88.659],  # Lava
-            [27.120, 88.583],  # Algarah
-            [27.240, 88.590],  # Pakyong
-            [27.331, 88.613],  # Gangtok
+            [26.885, 88.471],
+            [27.086, 88.659],
+            [27.120, 88.583],
+            [27.240, 88.590],
+            [27.331, 88.613],
         ]
         folium.PolyLine(
             nh717a_coords,
@@ -1110,7 +465,6 @@ with tab1:
             tooltip="NH-717A Strategic Bypass Artery",
         ).add_to(m)
 
-        # Render Dynamic Catchment Polygons
         for z_name, z_res in zone_results.items():
             folium.CircleMarker(
                 location=[z_res["lat"], z_res["lon"]],
@@ -1123,7 +477,6 @@ with tab1:
                 tooltip=f"{z_name} | FoS: {z_res['fos']}",
             ).add_to(m)
 
-        # Render Map inside clean container
         st_folium(m, width="100%", height=520)
 
     with col_details:
@@ -1142,7 +495,6 @@ with tab1:
                 unsafe_allow_html=True,
             )
 
-    # Feature: Quantitative Route Delta Card (Engaged during active alerts)
     if red_zones > 0:
         st.markdown(
             f"""
@@ -1174,7 +526,6 @@ with tab1:
             unsafe_allow_html=True,
         )
 
-    # Feature: Explainable AI (XAI) Sensitivity Breakdown
     with st.expander(
         "🔍 Explainable AI (XAI) & Geotechnical Rupture Analysis",
         expanded=False,
@@ -1284,7 +635,6 @@ with tab3:
 
     alert_info = ALERT_TRANSLATIONS[selected_lang]
 
-    # Handset Notification Box
     st.markdown(
         f"""
     <div style="max-width: 620px; margin: 16px auto; background: #450a0a; border: 2px solid #ef4444; border-radius: 14px; padding: 20px; box-shadow: 0 10px 30px rgba(239, 68, 68, 0.3);">
